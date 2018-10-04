@@ -27,18 +27,55 @@ HIDE_CURSOR = '\x1b[?25l'
 SHOW_CURSOR = '\x1b[?25h'
 
 
+class _Window(object):
+    max_seconds = 2
+    max_items = None
+
+    def __init__(self, max_seconds=2, max_items=None):
+        self.max_seconds = max_seconds
+        self.max_items = max_items
+
+        stamp = time()
+        self.last = stamp - 0.001
+        self.counter = 0
+        self.deque = deque()
+        self.next(0, stamp)
+
+    def pop(self):
+        item = self.deque.popleft()
+        self.counter -= item[1]
+
+    def clean(self):
+        if self.max_items:
+            while len(self.deque) > self.max_items:
+                self.pop()
+        while len(self.deque) > 2 and self.last - self.deque[0][0] > float(self.max_seconds):
+            self.pop()
+
+    def next(self, n, t):
+        self.clean()
+        self.deque.append((self.last, n))
+        self.last = t
+        self.counter += n
+
+    @property
+    def avg(self):
+        return self.counter / (self.last - self.deque[0][0])
+
+
 class Infinite(object):
     file = stderr
-    sma_window = 10         # Simple Moving Average window
+    # Maximum number of next() calls to be held in Simple Moving Average
+    # window structure (in memory), default is unlimited.
+    sma_window_seconds = 2
+    sma_window = None
     check_tty = True
     hide_cursor = True
 
     def __init__(self, message='', **kwargs):
         self.index = 0
         self.start_ts = time()
-        self.avg = 0
-        self._ts = self.start_ts
-        self._xput = deque(maxlen=self.sma_window)
+        self.window = _Window(self.sma_window_seconds, self.sma_window)
         for key, val in kwargs.items():
             setattr(self, key, val)
 
@@ -61,13 +98,15 @@ class Infinite(object):
         return int(time() - self.start_ts)
 
     @property
+    def avg(self):
+        speed = self.window.avg
+        if speed:
+            return 1/speed
+        return 3600 # better constant?
+
+    @property
     def elapsed_td(self):
         return timedelta(seconds=self.elapsed)
-
-    def update_avg(self, n, dt):
-        if n > 0:
-            self._xput.append(dt / n)
-            self.avg = sum(self._xput) / len(self._xput)
 
     def update(self):
         pass
@@ -102,10 +141,7 @@ class Infinite(object):
         return self.file.isatty() if self.check_tty else True
 
     def next(self, n=1):
-        now = time()
-        dt = now - self._ts
-        self.update_avg(n, dt)
-        self._ts = now
+        self.window.next(n, time())
         self.index = self.index + n
         self.update()
 
