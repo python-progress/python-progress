@@ -12,7 +12,7 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-from __future__ import division
+from __future__ import division, print_function
 
 from collections import deque
 from datetime import timedelta
@@ -21,58 +21,40 @@ from sys import stderr
 from time import time
 
 
-__version__ = '1.2'
+__version__ = '1.4'
+
+HIDE_CURSOR = '\x1b[?25l'
+SHOW_CURSOR = '\x1b[?25h'
 
 
-"""
-The moving average is calculated by this formula:
-
-  _in_window / (time() - oldest_timestamp_in_window)
-
-Because the frequency of calling next() callback might be rather very high,
-doing the naive next()/avg() implementation leads to issues (PR 23):
-
-  def next(N):
-     t = time()
-     delta = N / (t - last_timestamp) # very small number
-     _dt.append(delta)
-     _avg = sum(_dt)/len(_dt)
-     last_timestamp = t
-
-.. Even if 'len(_dt)' was 1000, the time frame can be very small (e.g. file
-download for next(N=8k in bytes) on 1Gbit network.  With the mentioned formula
-the window size is limited by *time*, not by the next() callback frequency.
-
-The moving average is calculated -at most- for the last 3 seconds by default:
-
-  sma_window x sma_delta = 10 x 0.3 = 3s
-
-Users can change this default window size, when needed.
-"""
 class Infinite(object):
     file = stderr
-    sma_window = 10     # Size of the window -- (max) number of sma_delta items.
-    sma_delta  = 0.3    # Time-length of one item in window, in seconds.
+    sma_window = 10         # Simple Moving Average window
+    check_tty = True
+    hide_cursor = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, message='', **kwargs):
         self.index = 0
         self.start_ts = time()
+        self.avg = 0
         self._ts = self.start_ts
-        self._dt = deque()
-        self._in_window = 0
+        self._xput = deque(maxlen=self.sma_window)
         for key, val in kwargs.items():
             setattr(self, key, val)
+
+        self._width = 0
+        self.message = message
+
+        if self.file and self.is_tty():
+            if self.hide_cursor:
+                print(HIDE_CURSOR, end='', file=self.file)
+            print(self.message, end='', file=self.file)
+            self.file.flush()
 
     def __getitem__(self, key):
         if key.startswith('_'):
             return None
         return getattr(self, key, None)
-
-    @property
-    def avg(self):
-        if not self._in_window:
-            return 0
-        return (self._ts - self._dt[0]['t']) / self._in_window
 
     @property
     def elapsed(self):
@@ -82,47 +64,63 @@ class Infinite(object):
     def elapsed_td(self):
         return timedelta(seconds=self.elapsed)
 
+    def update_avg(self, n, dt):
+        if n > 0:
+            self._xput.append(dt / n)
+            self.avg = sum(self._xput) / len(self._xput)
+
     def update(self):
         pass
 
     def start(self):
         pass
 
+    def clearln(self):
+        if self.file and self.is_tty():
+            print('\r\x1b[K', end='', file=self.file)
+
+    def write(self, s):
+        if self.file and self.is_tty():
+            line = self.message + s.ljust(self._width)
+            print('\r' + line, end='', file=self.file)
+            self._width = max(self._width, len(s))
+            self.file.flush()
+
+    def writeln(self, line):
+        if self.file and self.is_tty():
+            self.clearln()
+            print(line, end='', file=self.file)
+            self.file.flush()
+
     def finish(self):
-        pass
+        if self.file and self.is_tty():
+            print(file=self.file)
+            if self.hide_cursor:
+                print(SHOW_CURSOR, end='', file=self.file)
+
+    def is_tty(self):
+        return self.file.isatty() if self.check_tty else True
 
     def next(self, n=1):
-        self._ts = time()
-
-        item = {'t': self._ts, 'n': 0}
-        if len(self._dt):
-            old_item = self._dt.pop()
-            if self._ts > old_item['t'] + self.sma_delta:
-                # Already reached timeout, we are not going to
-                # touch this item.  Return it back.
-                self._dt.append(old_item)
-            else:
-                item = old_item
-
-        item['n'] = item['n'] + n
-
-        self._dt.append(item)
-        self._in_window = self._in_window + n
-
-        if len(self._dt) > self.sma_window:
-            item = self._dt.popleft()
-            self._in_window = self._in_window - item['n']
-
+        now = time()
+        dt = now - self._ts
+        self.update_avg(n, dt)
+        self._ts = now
         self.index = self.index + n
         self.update()
 
     def iter(self, it):
-        try:
+        with self:
             for x in it:
                 yield x
                 self.next()
-        finally:
-            self.finish()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finish()
 
 
 class Progress(Infinite):
@@ -163,9 +161,7 @@ class Progress(Infinite):
         except TypeError:
             pass
 
-        try:
+        with self:
             for x in it:
                 yield x
                 self.next()
-        finally:
-            self.finish()
