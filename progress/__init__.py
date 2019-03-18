@@ -21,7 +21,7 @@ from sys import stderr
 from time import time
 
 
-__version__ = '1.4'
+__version__ = '1.5'
 
 HIDE_CURSOR = '\x1b[?25l'
 SHOW_CURSOR = '\x1b[?25h'
